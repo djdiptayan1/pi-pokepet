@@ -49,7 +49,9 @@ import {
 	type PetdexManifestPet,
 	type PetdexPet,
 } from "./petdex.ts";
-import { buildTextPetWidget } from "./petdex-widget.ts";
+import { getNativePetdexFrame, type NativeRenderedPet, prepareNativePetdexPet } from "./petdex-native-renderer.ts";
+import { getRenderedPetFrame, type RenderedPet, renderPetdexPetForColumns } from "./petdex-renderer.ts";
+import { buildNativePetWidget, buildTextPetWidget, supportsNativeImagePets } from "./petdex-widget.ts";
 import {
 	applySavedState,
 	getPetPersonality,
@@ -61,6 +63,7 @@ import {
 	state,
 	tierOf,
 } from "./state.ts";
+import { fmtTokens, getUsageWindows, invalidateUsageCache, parseCap } from "./usage.ts";
 
 let ctxRef: ExtensionContext | undefined;
 let animTimer: ReturnType<typeof setInterval> | null = null;
@@ -150,13 +153,68 @@ function stopAwake(): void {
 
 const pick = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]!;
 const asciiMon = (): Mon => MON[state.asciiPetKey] ?? MON.pikachu!;
+/** Both image (Electron window) and terminal styles use a Petdex sprite. */
+const isPetdexStyle = (): boolean => state.style === "image" || state.style === "terminal";
+
+// In-terminal Petdex sprite renderers (terminal style). Native = crisp PNG on
+// Kitty/iTerm2; ANSI = truecolor half-block fallback everywhere else.
+let termAnsiPet: RenderedPet | undefined;
+let termNativePet: NativeRenderedPet | undefined;
+let termPetKey: { slug: string; size: string; cols: number } | undefined;
+let termPreparing = false;
+let termImageId = 1;
 
 function imageName(): string {
 	return activeImagePet?.metadata.displayName || state.imagePetSlug || "Petdex pet";
 }
 
 function displayName(): string {
-	return state.nick || (state.style === "image" ? imageName() : asciiMon().name);
+	return state.nick || (state.style === "ascii" ? asciiMon().name : imageName());
+}
+
+/**
+ * Prepare the in-terminal sprite frames for the active Petdex pet (terminal
+ * style). Async + cached; re-prepares when the pet, size, or width changes.
+ * Picks the native PNG renderer on capable terminals, ANSI half-block elsewhere.
+ */
+async function prepareTerminalSprite(): Promise<void> {
+	if (state.style !== "terminal" || !state.imagePetSlug) return;
+	const pet = loadLocalPetdexPet(state.imagePetSlug);
+	if (!pet) return;
+	activeImagePet = pet;
+	const cols = widgetColumns();
+	const size = state.size;
+	const ready = termNativePet || termAnsiPet;
+	if (ready && termPetKey && termPetKey.slug === pet.slug && termPetKey.size === size && termPetKey.cols === cols) {
+		return;
+	}
+	if (termPreparing) return;
+	termPreparing = true;
+	try {
+		if (supportsNativeImagePets()) {
+			termNativePet = await prepareNativePetdexPet(pet);
+			termAnsiPet = undefined;
+		} else {
+			termAnsiPet = await renderPetdexPetForColumns(pet, size, cols);
+			termNativePet = undefined;
+		}
+		termPetKey = { slug: pet.slug, size, cols };
+		lastRendered = "";
+		render();
+	} catch (err) {
+		ctxRef?.ui.notify(
+			`Couldn't prepare terminal sprite: ${err instanceof Error ? err.message : "unknown error"}; showing ASCII.`,
+			"error",
+		);
+	} finally {
+		termPreparing = false;
+	}
+}
+
+function resetTerminalSprite(): void {
+	termAnsiPet = undefined;
+	termNativePet = undefined;
+	termPetKey = undefined;
 }
 
 function widgetColumns(): number {
@@ -193,6 +251,28 @@ function wrapPlain(text: string, maxColumns: number): string[] {
 function statusLines(nameColor: number, tag: string, messageColor: number, maxColumns: number): string[] {
 	const plain = `${displayName()} ${tag}  ${state.message}`.trim();
 	return wrapPlain(plain, maxColumns).map((line, idx) => (idx === 0 ? c(nameColor, line) : c(messageColor, line)));
+}
+
+function usagePct(used: number, cap: number): number {
+	return Math.max(0, Math.min(100, (used / Math.max(1, cap)) * 100));
+}
+
+function usageBarColor(pct: number): number {
+	return pct >= 90 ? 203 : pct >= 70 ? 214 : 84;
+}
+
+/** Two compact bars (5h + weekly token consumption) shown under the food bar. */
+function usageLines(): string[] {
+	const u = getUsageWindows();
+	const p5 = usagePct(u.h5.tokens, state.cap5h);
+	const pW = usagePct(u.week.tokens, state.capWeek);
+	const l5 = dim(
+		`5h ${c(usageBarColor(p5), bar(p5, 8))} ${Math.round(p5)}%  ${fmtTokens(u.h5.tokens)}/${fmtTokens(state.cap5h)}`,
+	);
+	const lW = dim(
+		`wk ${c(usageBarColor(pW), bar(pW, 8))} ${Math.round(pW)}%  ${fmtTokens(u.week.tokens)}/${fmtTokens(state.capWeek)}`,
+	);
+	return [l5, lW];
 }
 
 function idlePool(): string[] {
@@ -269,6 +349,55 @@ function render(): void {
 					? 84
 					: 250;
 
+	if (state.style === "terminal") {
+		// Petdex sprite rendered INSIDE the terminal widget (no Electron window).
+		const needsPrep =
+			(!termAnsiPet && !termNativePet) ||
+			!termPetKey ||
+			termPetKey.slug !== state.imagePetSlug ||
+			termPetKey.cols !== maxColumns ||
+			termPetKey.size !== state.size;
+		if (needsPrep) void prepareTerminalSprite();
+
+		const nameColor = 117;
+		const status = statusLines(nameColor, "Petdex", messageColor, maxColumns);
+		const meter = dim(`${c(203, "\u2665")}${bar(state.energy)} ${Math.round(state.energy)}`);
+		const extras = [...status, meter, ...usageLines()];
+
+		if (termNativePet) {
+			const frame = getNativePetdexFrame(termNativePet, state.mood, Math.floor(state.frameIdx / 2), state.lastIntent);
+			if (frame) {
+				const signature = ["native", state.imagePetSlug, frame.filename, ...extras].join("\n");
+				if (signature === lastRendered) return;
+				lastRendered = signature;
+				const imageId = termImageId++;
+				ctxRef.ui.setWidget(
+					"pokepet",
+					() =>
+						buildNativePetWidget({
+							frame,
+							imageId,
+							size: state.size,
+							statusLines: [...status, ...usageLines()],
+							meterLine: meter,
+							terminalRows: process.stdout.rows,
+						}),
+					{ placement: "belowEditor" },
+				);
+				return;
+			}
+		} else if (termAnsiPet) {
+			const frameLines = getRenderedPetFrame(termAnsiPet, state.mood, state.frameIdx, state.lastIntent);
+			const lines = [...frameLines, ...extras];
+			const signature = ["text:sprite", ...lines].join("\n");
+			if (signature === lastRendered) return;
+			lastRendered = signature;
+			ctxRef.ui.setWidget("pokepet", () => buildTextPetWidget({ lines }), { placement: "belowEditor" });
+			return;
+		}
+		// Not prepared yet — fall through to the live ASCII pet until frames are ready.
+	}
+
 	if (state.style === "image") {
 		// Launch Electron if not running (self-heals a missing runtime once).
 		launchElectron();
@@ -283,7 +412,7 @@ function render(): void {
 			const status = statusLines(nameColor, tag, messageColor, maxColumns);
 			const meter = dim(`${c(203, "\u2665")}${bar(state.energy)} ${Math.round(state.energy)}`);
 
-			const lines = [...status, meter];
+			const lines = [...status, meter, ...usageLines()];
 			const signature = ["text:electron", ...lines].join("\n");
 			if (signature === lastRendered) return;
 			lastRendered = signature;
@@ -304,6 +433,7 @@ function render(): void {
 
 	lines.push(...status);
 	lines.push(meter);
+	lines.push(...usageLines());
 
 	const signature = ["text:ascii", ...lines].join("\n");
 	if (signature === lastRendered) return;
@@ -398,9 +528,15 @@ async function choosePet(value: string): Promise<string> {
 
 	const installed = loadLocalPetdexPet(key);
 	if (installed) {
-		state.style = "image";
+		// Keep the current Petdex presentation (terminal sprite or desktop window);
+		// only default to the window when coming from ASCII.
+		if (state.style !== "terminal") state.style = "image";
 		state.nick = "";
 		await activateImagePet(key);
+		if (state.style === "terminal") {
+			resetTerminalSprite();
+			await prepareTerminalSprite();
+		}
 		saveState();
 		setMood("happy", { message: `${installed.metadata.displayName} joined from Petdex!` });
 		return `Now partnered with ${installed.metadata.displayName}`;
@@ -435,6 +571,8 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 					"error",
 				);
 			}
+		} else if (state.style === "terminal" && state.imagePetSlug) {
+			void prepareTerminalSprite();
 		}
 
 		setElectronHooks({
@@ -632,7 +770,7 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("pet", {
 		description:
-			"pet: style ascii|image | list | choose <id> | gallery [query] | install <slug> | uninstall <slug> | nick <n> | feed | awake [reason] | sleep | stats | status | ps | kill [pid] | hide | show | help",
+			"pet: style ascii|image|terminal | list | choose <id> | gallery [query] | install <slug> | uninstall <slug> | nick <n> | feed | limit [5h|week <n>] | awake [reason] | sleep | stats | status | ps | kill [pid] | hide | show | help",
 		handler: async (args, ctx) => {
 			ctxRef = ctx;
 			const [cmd = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
@@ -643,7 +781,8 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 					case "help": {
 						const helpLines = [
 							"Available commands:",
-							"  /pet style ascii|image  - Switch rendering style",
+							"  /pet style ascii|image|terminal - Switch rendering style",
+							"      ascii: TUI line-art | image: desktop window | terminal: sprite in-terminal",
 							"  /pet setup              - Install/repair the Electron companion runtime",
 							"  /pet list               - List installed pets for active style",
 							"  /pet choose <id>        - Partner with an ASCII pet or installed Petdex pet",
@@ -652,6 +791,7 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 							"  /pet uninstall <slug>   - Uninstall and delete a Petdex pet from disk",
 							"  /pet nick <nickname>    - Set custom nickname",
 							"  /pet feed               - Feed your pet to restore energy",
+							"  /pet limit [5h|week <n>]- Show/set rolling usage caps (e.g. 10m, 50m)",
 							"  /pet awake [reason]     - Keep system awake",
 							"  /pet sleep              - Allow system to sleep / put pet to sleep",
 							"  /pet stats              - View productivity stats",
@@ -666,25 +806,38 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 
 					case "style": {
 						const style = value.toLowerCase();
-						if (style !== "ascii" && style !== "image") return ctx.ui.notify("Usage: /pet style ascii|image", "error");
-						if (style === "image") {
+						if (style !== "ascii" && style !== "image" && style !== "terminal")
+							return ctx.ui.notify("Usage: /pet style ascii|image|terminal", "error");
+						if (style === "image" || style === "terminal") {
 							if (!state.imagePetSlug) {
 								const first = listLocalPetdexPets()[0];
 								if (!first)
 									return ctx.ui.notify("No Petdex pets installed. Try /pet install boba or /pet gallery.", "error");
 								state.imagePetSlug = first.slug;
 							}
-							state.style = "image";
-							await ensureImageReady();
-							launchElectron();
-						} else if (style === "ascii") {
-							stopElectron();
 						}
 						state.style = style;
+						if (style === "image") {
+							await ensureImageReady();
+							launchElectron();
+						} else if (style === "terminal") {
+							// In-terminal sprite only — ensure no desktop window lingers.
+							stopElectron();
+							resetTerminalSprite();
+							await prepareTerminalSprite();
+						} else {
+							stopElectron();
+						}
 						state.visible = true;
 						saveState();
 						lastRendered = "";
-						setMood("happy", { message: style === "image" ? "Petdex image mode online!" : "ASCII mode online!" });
+						const onlineMsg =
+							style === "image"
+								? "Petdex image mode online!"
+								: style === "terminal"
+									? "Petdex in-terminal sprite online!"
+									: "ASCII mode online!";
+						setMood("happy", { message: onlineMsg });
 						return ctx.ui.notify(`Pet style set to ${style}.`, "info");
 					}
 
@@ -700,7 +853,7 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 					}
 
 					case "list": {
-						if (state.style === "image") {
+						if (isPetdexStyle()) {
 							const pets = listLocalPetdexPets();
 							if (pets.length === 0) return ctx.ui.notify("No installed Petdex pets. Try /pet install boba.", "info");
 							return ctx.ui.notify(
@@ -728,9 +881,13 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 						const slug = value.toLowerCase();
 						if (!slug) return ctx.ui.notify("Usage: /pet install <slug>", "error");
 						const pet = await installPetdexPet(slug);
-						state.style = "image";
+						if (state.style !== "terminal") state.style = "image";
 						state.nick = "";
 						await activateImagePet(pet.slug);
+						if (state.style === "terminal") {
+							resetTerminalSprite();
+							await prepareTerminalSprite();
+						}
 						saveState();
 						setMood("happy", { message: `${pet.metadata.displayName} installed! ✦` });
 						return ctx.ui.notify(`Installed and selected ${pet.metadata.displayName}.`, "info");
@@ -786,6 +943,40 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 						setMood("happy", { message: pick(["*nom nom* thank you!", "a berry! best partner ✦", "*happy wiggle*"]) });
 						return ctx.ui.notify(`Fed ${displayName()} a berry (energy ${Math.round(state.energy)})`, "info");
 
+					case "limit":
+					case "limits":
+					case "usage": {
+						const [which = "", ...capParts] = value.split(/\s+/).filter(Boolean);
+						const target = which.toLowerCase();
+						const is5h = target === "5h" || target === "5hr" || target === "hour" || target === "hourly";
+						const isWeek = target === "week" || target === "weekly" || target === "wk";
+						if (!target) {
+							const u = getUsageWindows(true);
+							const p5 = Math.round(usagePct(u.h5.tokens, state.cap5h));
+							const pW = Math.round(usagePct(u.week.tokens, state.capWeek));
+							const lines = [
+								"Usage (local token consumption from session logs vs your caps):",
+								`  5h:   ${fmtTokens(u.h5.tokens)} / ${fmtTokens(state.cap5h)} (${p5}%)  $${u.h5.cost.toFixed(2)}`,
+								`  week: ${fmtTokens(u.week.tokens)} / ${fmtTokens(state.capWeek)} (${pW}%)  $${u.week.cost.toFixed(2)}`,
+								"Set caps:  /pet limit 5h <n>  |  /pet limit week <n>   (n like 10m, 50m, 1.5b)",
+								"Note: real Anthropic/OpenAI weekly & 5h limits aren't exposed to extensions;",
+								"this tracks YOUR own usage from ~/.pi/agent/sessions logs.",
+							];
+							return ctx.ui.notify(lines.join("\n"), "info");
+						}
+						const cap = parseCap(capParts.join(""));
+						if (cap === null)
+							return ctx.ui.notify("Usage: /pet limit 5h <n> | /pet limit week <n>  (n like 10m, 50m)", "error");
+						if (is5h) state.cap5h = cap;
+						else if (isWeek) state.capWeek = cap;
+						else return ctx.ui.notify("Usage: /pet limit 5h <n> | /pet limit week <n>", "error");
+						saveState();
+						invalidateUsageCache();
+						lastRendered = "";
+						render();
+						return ctx.ui.notify(`Set ${is5h ? "5h" : "weekly"} cap to ${fmtTokens(cap)} tokens.`, "info");
+					}
+
 					case "hide":
 						state.visible = false;
 						render();
@@ -838,13 +1029,12 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 						const dayAgo = Date.now() - 86_400_000;
 						const last = evs.filter((event) => event.t >= dayAgo);
 						const n = (type: string) => last.filter((event) => event.type === type).length;
-						const id = state.style === "image" ? state.imagePetSlug || "Petdex" : state.asciiPetKey;
+						const id = isPetdexStyle() ? state.imagePetSlug || "Petdex" : state.asciiPetKey;
 						const pers = getPetPersonality(id, state.nick);
 						const met = new Date(state.firstMet).toISOString().slice(0, 10);
-						const petLine =
-							state.style === "image"
-								? `${displayName()} (${state.imagePetSlug || "Petdex"})`
-								: `${displayName()} the ${asciiMon().name}`;
+						const petLine = isPetdexStyle()
+							? `${displayName()} (${state.imagePetSlug || "Petdex"})`
+							: `${displayName()} the ${asciiMon().name}`;
 						const lines = [
 							`${petLine} - ${pers.tier} Companion`,
 							`Personality: Chaos ${pers.chaos}% | Curiosity ${pers.curiosity}% | Snark ${pers.snark}%`,
@@ -858,13 +1048,12 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 						const status = getManagerStatus();
 						const activePid = status.electronPid ? `PID ${status.electronPid}` : "Not running";
 						const activePort = status.serverPort ? `Port ${status.serverPort}` : "Not listening";
-						const id = state.style === "image" ? state.imagePetSlug || "Petdex" : state.asciiPetKey;
+						const id = isPetdexStyle() ? state.imagePetSlug || "Petdex" : state.asciiPetKey;
 						const pers = getPetPersonality(id, state.nick);
 						const awake = isAwake() ? " - awake" : "";
-						const identity =
-							state.style === "image"
-								? `${displayName()} (${state.imagePetSlug || "Petdex"})`
-								: `${displayName()} the ${asciiMon().name} (${asciiMon().type})`;
+						const identity = isPetdexStyle()
+							? `${displayName()} (${state.imagePetSlug || "Petdex"})`
+							: `${displayName()} the ${asciiMon().name} (${asciiMon().type})`;
 						const avail = getElectronAvailability();
 						const runtime =
 							avail.status === "ready" ? "ready" : `${avail.status}${avail.reason ? ` (${avail.reason})` : ""}`;
@@ -951,10 +1140,9 @@ export default function pokepetExtension(pi: ExtensionAPI) {
 					default: {
 						const tier = tierOf(state.sessions);
 						const awake = isAwake() ? " - awake" : "";
-						const identity =
-							state.style === "image"
-								? `${displayName()} (${state.imagePetSlug || "Petdex"})`
-								: `${displayName()} the ${asciiMon().name} (${asciiMon().type})`;
+						const identity = isPetdexStyle()
+							? `${displayName()} (${state.imagePetSlug || "Petdex"})`
+							: `${displayName()} the ${asciiMon().name} (${asciiMon().type})`;
 						return ctx.ui.notify(
 							`${identity} - ${state.style} - ${tier} - ${state.sessions} sessions - energy ${Math.round(state.energy)} - mood ${state.mood}${awake}`,
 							"info",

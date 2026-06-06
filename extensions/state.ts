@@ -16,7 +16,7 @@ const STATE_FILE = join(DIR, "pokepet-state.json");
 const EVENT_FILE = join(DIR, "pokepet-events.jsonl");
 
 export interface PokeState {
-	style: "ascii" | "image";
+	style: "ascii" | "image" | "terminal";
 	asciiPetKey: string;
 	imagePetSlug: string;
 	nick: string;
@@ -34,7 +34,13 @@ export interface PokeState {
 	editTimes: number[];
 	/** True while a tool is executing, so the pet doesn't go idle mid-run. */
 	toolActive: boolean;
+	/** User-configurable token caps for the rolling 5h / weekly usage bars. */
+	cap5h: number;
+	capWeek: number;
 }
+
+export const DEFAULT_CAP_5H = 10_000_000;
+export const DEFAULT_CAP_WEEK = 50_000_000;
 
 export const state: PokeState = {
 	style: "ascii",
@@ -53,10 +59,12 @@ export const state: PokeState = {
 	failStreak: 0,
 	editTimes: [],
 	toolActive: false,
+	cap5h: DEFAULT_CAP_5H,
+	capWeek: DEFAULT_CAP_WEEK,
 };
 
 export interface SavedState {
-	style: "ascii" | "image";
+	style: "ascii" | "image" | "terminal";
 	asciiPetKey: string;
 	imagePetSlug: string;
 	/** Legacy key from versions that only supported the ASCII Pokemon roster. */
@@ -67,6 +75,8 @@ export interface SavedState {
 	firstMet: string;
 	lastSeen: string;
 	energy: number;
+	cap5h?: number;
+	capWeek?: number;
 }
 
 export function loadSaved(): Partial<SavedState> {
@@ -81,7 +91,7 @@ export function loadSaved(): Partial<SavedState> {
 export function applySavedState(saved: Partial<SavedState>, hasAsciiPet: (key: string) => boolean): void {
 	const asciiKey = saved.asciiPetKey || saved.monKey;
 	if (asciiKey && hasAsciiPet(asciiKey)) state.asciiPetKey = asciiKey;
-	if (saved.style === "image" || saved.style === "ascii") state.style = saved.style;
+	if (saved.style === "image" || saved.style === "ascii" || saved.style === "terminal") state.style = saved.style;
 	if (typeof saved.imagePetSlug === "string") state.imagePetSlug = saved.imagePetSlug;
 	if (typeof saved.nick === "string") state.nick = saved.nick;
 	if (saved.size === "large" || saved.size === "small") state.size = saved.size;
@@ -90,6 +100,8 @@ export function applySavedState(saved: Partial<SavedState>, hasAsciiPet: (key: s
 		const mins = saved.lastSeen ? (Date.now() - Date.parse(saved.lastSeen)) / 60_000 : 0;
 		state.energy = Math.max(0, Math.min(100, saved.energy - mins * 0.02));
 	}
+	if (typeof saved.cap5h === "number" && saved.cap5h > 0) state.cap5h = saved.cap5h;
+	if (typeof saved.capWeek === "number" && saved.capWeek > 0) state.capWeek = saved.capWeek;
 	state.sessions = (saved.sessions ?? 0) + 1;
 }
 
@@ -106,6 +118,8 @@ export function saveState(): void {
 			firstMet: state.firstMet,
 			lastSeen: new Date().toISOString(),
 			energy: Math.round(state.energy),
+			cap5h: state.cap5h,
+			capWeek: state.capWeek,
 		};
 		writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
 	} catch {

@@ -31,6 +31,7 @@ pi -e npm:pi-pokepet
 ```text
 /pet                         status
 /pet style image             use Petdex image companion (Electron window)
+/pet style terminal          render the Petdex sprite inside the terminal (no window)
 /pet style ascii             use the legacy ASCII roster (TUI only)
 /pet setup | repair          install or repair the Electron companion runtime
 /pet list                    list pets for the active style
@@ -39,6 +40,7 @@ pi -e npm:pi-pokepet
 /pet install <slug>          download and select a Petdex / codex-pets gallery pet
 /pet nick <nickname>         give it a nickname
 /pet feed                    restore energy
+/pet limit [5h|week <n>]     show/set rolling token usage caps (e.g. 10m, 50m)
 /pet awake [reason]          keep your system from sleeping
 /pet sleep                   release keep-awake or make the pet nap
 /pet stats                   productivity and bond dashboard

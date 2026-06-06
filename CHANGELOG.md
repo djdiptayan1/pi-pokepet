@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.7.0 - In-terminal sprite mode + rolling usage bars
+
+### Added
+
+- `/pet style terminal` - render the animated Petdex sprite INSIDE the terminal widget (the same spot where the ASCII pet loads), with no desktop window. Uses Pi's native image protocol (crisp PNG) on Kitty/iTerm2/Ghostty/WezTerm and a truecolor ANSI half-block fallback on every other truecolor terminal. Same mood->action animation states as the desktop companion.
+- Rolling usage bars beneath the energy/food bar showing token consumption over the last 5 hours and last 7 days, color-coded (green/amber/red) with cost.
+- `/pet limit` to view usage and `/pet limit 5h <n>` / `/pet limit week <n>` to set caps (accepts `10m`, `50m`, `1.5b`, or raw numbers). Caps persist in `pokepet-state.json` (defaults 10M / 50M tokens).
+
+### Notes
+
+- Usage is read from pi's own session logs under `~/.pi/agent/sessions` (per-message tokens + cost), cached ~60s. Anthropic/OpenAI's real weekly & 5-hour subscription limits are not exposed to pi extensions, so these bars track your measured usage against your configurable caps rather than the provider's remaining quota.
+
+### Internal
+
+- Re-wired the previously dormant native/ANSI Petdex terminal renderers into the render path behind the new `terminal` style.
+- Added `extensions/usage.ts` plus tests for cap parsing, token formatting, and rolling-window bucketing.
+
 ## 1.6.3 - Self-healing Electron runtime, Linux window fixes & CLI aliases
 
 - Fixed the `Electron binary not found` error spam on fresh installs. Because pi installs extensions with `npm install -g --ignore-scripts`, Electron's binary download postinstall never ran, so the companion window could not launch (most visible on Linux). The extension now provisions the runtime itself at first use.
