@@ -51,7 +51,12 @@ import {
 } from "./petdex.ts";
 import { getNativePetdexFrame, type NativeRenderedPet, prepareNativePetdexPet } from "./petdex-native-renderer.ts";
 import { getRenderedPetFrame, type RenderedPet, renderPetdexPetForColumns } from "./petdex-renderer.ts";
-import { buildNativePetWidget, buildTextPetWidget, supportsNativeImagePets } from "./petdex-widget.ts";
+import {
+	buildNativePetWidget,
+	buildTextPetWidget,
+	supportsNativeImagePets,
+	supportsTrueColorPets,
+} from "./petdex-widget.ts";
 import {
 	applySavedState,
 	getPetPersonality,
@@ -160,6 +165,9 @@ const isPetdexStyle = (): boolean => state.style === "image" || state.style === 
 // Kitty/iTerm2; ANSI = truecolor half-block fallback everywhere else.
 let termAnsiPet: RenderedPet | undefined;
 let termNativePet: NativeRenderedPet | undefined;
+/** True when this terminal supports neither native images nor truecolor, so the
+ * sprite can't render and we fall back to the ASCII roster pet (e.g. Terminal.app). */
+let termSpriteUnsupported = false;
 let termPetKey: { slug: string; size: string; cols: number } | undefined;
 let termPreparing = false;
 let termImageId = 1;
@@ -184,7 +192,7 @@ async function prepareTerminalSprite(): Promise<void> {
 	activeImagePet = pet;
 	const cols = widgetColumns();
 	const size = state.size;
-	const ready = termNativePet || termAnsiPet;
+	const ready = termNativePet || termAnsiPet || termSpriteUnsupported;
 	if (ready && termPetKey && termPetKey.slug === pet.slug && termPetKey.size === size && termPetKey.cols === cols) {
 		return;
 	}
@@ -194,9 +202,17 @@ async function prepareTerminalSprite(): Promise<void> {
 		if (supportsNativeImagePets()) {
 			termNativePet = await prepareNativePetdexPet(pet);
 			termAnsiPet = undefined;
-		} else {
+			termSpriteUnsupported = false;
+		} else if (supportsTrueColorPets()) {
 			termAnsiPet = await renderPetdexPetForColumns(pet, size, cols);
 			termNativePet = undefined;
+			termSpriteUnsupported = false;
+		} else {
+			// No image protocol and no 24-bit color (e.g. macOS Terminal.app):
+			// fall back to the ASCII roster pet rendered below.
+			termNativePet = undefined;
+			termAnsiPet = undefined;
+			termSpriteUnsupported = true;
 		}
 		termPetKey = { slug: pet.slug, size, cols };
 		lastRendered = "";
@@ -214,6 +230,7 @@ async function prepareTerminalSprite(): Promise<void> {
 function resetTerminalSprite(): void {
 	termAnsiPet = undefined;
 	termNativePet = undefined;
+	termSpriteUnsupported = false;
 	termPetKey = undefined;
 }
 
@@ -261,18 +278,15 @@ function usageBarColor(pct: number): number {
 	return pct >= 90 ? 203 : pct >= 70 ? 214 : 84;
 }
 
-/** Two compact bars (5h + weekly token consumption) shown under the food bar. */
-function usageLines(): string[] {
+/** One compact line: energy + 5h + weekly usage bars, kept on a single row. */
+function statusMeterLine(): string {
 	const u = getUsageWindows();
 	const p5 = usagePct(u.h5.tokens, state.cap5h);
 	const pW = usagePct(u.week.tokens, state.capWeek);
-	const l5 = dim(
-		`5h ${c(usageBarColor(p5), bar(p5, 8))} ${Math.round(p5)}%  ${fmtTokens(u.h5.tokens)}/${fmtTokens(state.cap5h)}`,
-	);
-	const lW = dim(
-		`wk ${c(usageBarColor(pW), bar(pW, 8))} ${Math.round(pW)}%  ${fmtTokens(u.week.tokens)}/${fmtTokens(state.capWeek)}`,
-	);
-	return [l5, lW];
+	const energy = `${c(203, "\u2665")}${dim(bar(state.energy, 4))} ${dim(String(Math.round(state.energy)))}`;
+	const five = `${dim("5h")} ${c(usageBarColor(p5), bar(p5, 6))} ${dim(`${Math.round(p5)}%`)}`;
+	const week = `${dim("wk")} ${c(usageBarColor(pW), bar(pW, 6))} ${dim(`${Math.round(pW)}%`)}`;
+	return `${energy}  ${five}  ${week}`;
 }
 
 function idlePool(): string[] {
@@ -352,7 +366,7 @@ function render(): void {
 	if (state.style === "terminal") {
 		// Petdex sprite rendered INSIDE the terminal widget (no Electron window).
 		const needsPrep =
-			(!termAnsiPet && !termNativePet) ||
+			(!termAnsiPet && !termNativePet && !termSpriteUnsupported) ||
 			!termPetKey ||
 			termPetKey.slug !== state.imagePetSlug ||
 			termPetKey.cols !== maxColumns ||
@@ -361,8 +375,8 @@ function render(): void {
 
 		const nameColor = 117;
 		const status = statusLines(nameColor, "Petdex", messageColor, maxColumns);
-		const meter = dim(`${c(203, "\u2665")}${bar(state.energy)} ${Math.round(state.energy)}`);
-		const extras = [...status, meter, ...usageLines()];
+		const meter = statusMeterLine();
+		const extras = [...status, meter];
 
 		if (termNativePet) {
 			const frame = getNativePetdexFrame(termNativePet, state.mood, Math.floor(state.frameIdx / 2), state.lastIntent);
@@ -378,7 +392,7 @@ function render(): void {
 							frame,
 							imageId,
 							size: state.size,
-							statusLines: [...status, ...usageLines()],
+							statusLines: status,
 							meterLine: meter,
 							terminalRows: process.stdout.rows,
 						}),
@@ -410,9 +424,7 @@ function render(): void {
 			const nameColor = 117;
 			const tag = "Petdex";
 			const status = statusLines(nameColor, tag, messageColor, maxColumns);
-			const meter = dim(`${c(203, "\u2665")}${bar(state.energy)} ${Math.round(state.energy)}`);
-
-			const lines = [...status, meter, ...usageLines()];
+			const lines = [...status, statusMeterLine()];
 			const signature = ["text:electron", ...lines].join("\n");
 			if (signature === lastRendered) return;
 			lastRendered = signature;
@@ -429,11 +441,8 @@ function render(): void {
 	const nameColor = m.color;
 	const tag = m.tag;
 	const status = statusLines(nameColor, tag, messageColor, maxColumns);
-	const meter = dim(`${c(203, "\u2665")}${bar(state.energy)} ${Math.round(state.energy)}`);
-
 	lines.push(...status);
-	lines.push(meter);
-	lines.push(...usageLines());
+	lines.push(statusMeterLine());
 
 	const signature = ["text:ascii", ...lines].join("\n");
 	if (signature === lastRendered) return;

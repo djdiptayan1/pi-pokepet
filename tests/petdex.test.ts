@@ -194,8 +194,8 @@ test("detects unsupported native image terminals for ANSI fallback", async () =>
 	setNativeImageCapabilitiesForTests({ images: null, trueColor: true, hyperlinks: true });
 
 	assert.equal(supportsNativeImagePets(), false);
-	assert.deepEqual(nativeImageBudget("small", 12), { maxWidthCells: 28, maxHeightCells: 6 });
-	assert.deepEqual(nativeImageBudget("large", 40), { maxWidthCells: 42, maxHeightCells: 14 });
+	assert.deepEqual(nativeImageBudget("small", 12), { maxWidthCells: 10, maxHeightCells: 3 });
+	assert.deepEqual(nativeImageBudget("large", 40), { maxWidthCells: 18, maxHeightCells: 6 });
 });
 
 test("renders text pet widgets without Pi string-array truncation", async () => {

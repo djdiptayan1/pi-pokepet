@@ -4,7 +4,12 @@
 
 ### Added
 
-- `/pet style terminal` - render the animated Petdex sprite INSIDE the terminal widget (the same spot where the ASCII pet loads), with no desktop window. Uses Pi's native image protocol (crisp PNG) on Kitty/iTerm2/Ghostty/WezTerm and a truecolor ANSI half-block fallback on every other truecolor terminal. Same mood->action animation states as the desktop companion.
+- `/pet style terminal` - render the animated Petdex sprite INSIDE the terminal widget (the same spot where the ASCII pet loads), with no desktop window. Cross-terminal by design with graceful degradation:
+  - **Kitty / Ghostty / WezTerm / iTerm2** -> crisp native PNG (parity with the desktop window).
+  - **GNOME Terminal, Windows Terminal & other truecolor terminals** -> truecolor ANSI half-block sprite.
+  - **macOS Terminal.app / no-truecolor terminals** -> falls back to the ASCII roster pet instead of emitting garbled color.
+
+  The sprite is kept compact (~3 rows tall) and the energy + 5h + weekly bars render on a single line. Same mood->action animation states as the desktop companion.
 - Rolling usage bars beneath the energy/food bar showing token consumption over the last 5 hours and last 7 days, color-coded (green/amber/red) with cost.
 - `/pet limit` to view usage and `/pet limit 5h <n>` / `/pet limit week <n>` to set caps (accepts `10m`, `50m`, `1.5b`, or raw numbers). Caps persist in `pokepet-state.json` (defaults 10M / 50M tokens).
 

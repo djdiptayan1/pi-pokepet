@@ -33,18 +33,28 @@ export function supportsNativeImagePets(protocol: ImageProtocol = getCapabilitie
 	return protocol === "kitty" || protocol === "iterm2";
 }
 
+/**
+ * Whether the terminal can show the ANSI half-block sprite, which needs 24-bit
+ * color. False on e.g. macOS Terminal.app (256-color), where we fall back to the
+ * ASCII roster pet instead of emitting garbled truecolor escapes.
+ */
+export function supportsTrueColorPets(): boolean {
+	return getCapabilities().trueColor === true;
+}
+
 export function setNativeImageCapabilitiesForTests(caps: TerminalCapabilities): void {
 	setCapabilities(caps);
 }
 
 export function nativeImageBudget(size: RenderSize, terminalRows = process.stdout.rows || 24): NativeImageBudget {
-	const statusRows = 3;
-	const freeRows = Math.max(6, terminalRows - statusRows - 6);
-	const preferredRows = size === "large" ? 14 : 10;
-	const preferredColumns = size === "large" ? 42 : 28;
+	const statusRows = 2;
+	const freeRows = Math.max(3, terminalRows - statusRows - 4);
+	// Keep the in-terminal pet tiny (~2.5-3 rows tall) so it doesn't dominate.
+	const preferredRows = size === "large" ? 6 : 3;
+	const preferredColumns = size === "large" ? 18 : 10;
 	return {
 		maxWidthCells: preferredColumns,
-		maxHeightCells: Math.max(6, Math.min(preferredRows, freeRows)),
+		maxHeightCells: Math.max(2, Math.min(preferredRows, freeRows)),
 	};
 }
 
